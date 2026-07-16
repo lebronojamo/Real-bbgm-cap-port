@@ -34,9 +34,8 @@
   <div id="configWarning" class="card hidden"></div>
 
   <section id="loggedOut" class="card">
-    <h2>Shared server portal</h2>
-    <p class="muted">Sign in with Discord to create and manage your player.</p>
-    <button id="loginBtn">Sign in with Discord</button>
+    <h2>Local CAP portal</h2>
+    <p class="muted">Create players locally, approve them, and download a Basketball GM export with no account setup.</p>
   </section>
 
   <section id="app" class="hidden">
@@ -54,7 +53,7 @@
 
     <div id="view-create" class="view card hidden">
       <h2>Create Player</h2>
-      <p class="muted">Choose a build, then distribute the available points. One active player per Discord account.</p>
+      <p class="muted">Choose a build, then distribute the available points. One active local player at a time.</p>
       <form id="playerForm">
         <div class="grid cols">
           <div><label>First name</label><input id="firstName" required maxlength="30"></div>
@@ -88,26 +87,13 @@
 
     <div id="view-setup" class="view card hidden">
       <h2>Account</h2>
-      <p>Discord account: <strong id="userName"></strong></p>
-      <p class="small muted">Supabase user ID: <code id="userId"></code></p>
-      <p class="small muted">The commissioner sets this account’s role to <code>commissioner</code> in Supabase.</p>
+      <p>Account: <strong id="userName"></strong></p>
+      <p class="small muted">All data is stored in this browser with <code>localStorage</code>. Export your Basketball GM JSON after approving players.</p>
     </div>
   </section>
 </main>
 
 <script type="module">
-  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-  // Optional defaults. If left as placeholders, commissioners can enter config in the setup panel.
-  const DEFAULT_SUPABASE_URL = "PASTE_SUPABASE_URL";
-  const DEFAULT_SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_KEY";
-  const savedConfig = JSON.parse(localStorage.getItem("bbgmSupabaseConfig")||"{}");
-  const SUPABASE_URL = savedConfig.url||DEFAULT_SUPABASE_URL;
-  const SUPABASE_ANON_KEY = savedConfig.anonKey||DEFAULT_SUPABASE_ANON_KEY;
-
-  const configured = !SUPABASE_URL.startsWith("PASTE_") && !SUPABASE_ANON_KEY.startsWith("PASTE_");
-  const supabase = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
-
   const ATTRS = ["stre","spd","jmp","endu","ins","dnk","ft","fg","tp","oiq","diq","drb","pss","reb"];
   const LABELS = {stre:"Strength",spd:"Speed",jmp:"Jumping",endu:"Endurance",ins:"Inside",dnk:"Dunks/Layups",ft:"Free Throws",fg:"Two Pointers",tp:"Three Pointers",oiq:"Offensive IQ",diq:"Defensive IQ",drb:"Dribbling",pss:"Passing",reb:"Rebounding"};
   const BUILDS = {
@@ -119,11 +105,19 @@
     "Post Scorer":{base:40,bonus:{ins:23,stre:18,fg:12,reb:8},points:64},
     "Rim Protector":{base:40,bonus:{diq:20,jmp:14,stre:12,reb:18},points:64}
   };
+  const STORAGE_KEYS = {players:"bbgmCapPlayers",save:"bbgmMasterSave"};
 
-  let session=null, profile=null, myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, masterSave=null;
+  let myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, masterSave=null;
 
   const $=id=>document.getElementById(id);
   function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+  function readJSON(key,fallback){
+    try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}
+  }
+  function writeJSON(key,value){localStorage.setItem(key,JSON.stringify(value))}
+  function getPlayers(){return readJSON(STORAGE_KEYS.players,[])}
+  function savePlayers(players){writeJSON(STORAGE_KEYS.players,players)}
+  function newLocalId(){return `${Date.now()}-${Math.random().toString(36).slice(2,9)}`}
   function showView(name){
     document.querySelectorAll(".view").forEach(x=>x.classList.add("hidden"));
     $("view-"+name).classList.remove("hidden");
@@ -157,45 +151,9 @@
     });
   }
 
-  async function login(){
-    if(!supabase)return;
-    await supabase.auth.signInWithOAuth({provider:"discord",options:{redirectTo:location.origin+location.pathname}});
-  }
-  async function logout(){await supabase.auth.signOut();location.reload()}
-  $("loginBtn").onclick=login;
-
-  function renderConfigSetup(){
-    $("loggedOut").classList.add("hidden");
-    $("configWarning").classList.remove("hidden");
-    $("configWarning").innerHTML=`
-      <h2>Connect Supabase</h2>
-      <p class="muted">Paste your Supabase Project URL and anon public key, then reload to enable Discord sign-in. These values are saved only in this browser.</p>
-      <form id="configForm">
-        <label>Supabase Project URL</label>
-        <input id="configUrl" type="url" placeholder="https://your-project.supabase.co" value="${esc(savedConfig.url||"")}" required>
-        <label>Supabase anon public key</label>
-        <textarea id="configAnonKey" rows="3" placeholder="eyJ..." required>${esc(savedConfig.anonKey||"")}</textarea>
-        <div class="row" style="margin-top:12px">
-          <button type="submit">Save setup</button>
-          <button type="button" class="secondary" id="clearConfigBtn">Clear saved setup</button>
-        </div>
-      </form>`;
-    $("configForm").onsubmit=e=>{
-      e.preventDefault();
-      localStorage.setItem("bbgmSupabaseConfig",JSON.stringify({url:$("configUrl").value.trim(),anonKey:$("configAnonKey").value.trim()}));
-      location.reload();
-    };
-    $("clearConfigBtn").onclick=()=>{localStorage.removeItem("bbgmSupabaseConfig");location.reload()};
-    $("loginBtn").disabled=true;
-  }
-
-  async function loadProfile(){
-    const {data,error}=await supabase.from("profiles").select("*").eq("id",session.user.id).single();
-    if(error) throw error; profile=data;
-  }
-  async function loadMyPlayer(){
-    const {data}=await supabase.from("players").select("*").eq("user_id",session.user.id).order("created_at",{ascending:false}).limit(1).maybeSingle();
-    myPlayer=data; renderMyPlayer();
+  function loadMyPlayer(){
+    myPlayer=getPlayers().slice().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at))[0]||null;
+    renderMyPlayer();
   }
   function renderMyPlayer(){
     if(!myPlayer){$("myPlayerContent").innerHTML="No player submitted.";return}
@@ -207,24 +165,22 @@
       </div>`;
   }
 
-  $("playerForm").onsubmit=async e=>{
+  $("playerForm").onsubmit=e=>{
     e.preventDefault();
     if(myPlayer && myPlayer.status!=="rejected"){alert("You already have an active player.");return}
     const spent=ATTRS.reduce((n,a)=>n+(currentRatings[a]-baseRatings[a]),0);
     if(spent!==pointsBudget){alert("Use all attribute points before submitting.");return}
     const payload={
-      user_id:session.user.id,first_name:$("firstName").value.trim(),last_name:$("lastName").value.trim(),
+      id:newLocalId(),first_name:$("firstName").value.trim(),last_name:$("lastName").value.trim(),
       position:$("position").value,build:$("build").value,age:Number($("age").value),height:Number($("height").value),
-      ratings:currentRatings,status:"pending"
+      ratings:{...currentRatings},status:"pending",created_at:new Date().toISOString()
     };
-    const {error}=await supabase.from("players").insert(payload);
-    if(error){alert(error.message);return}
-    await loadMyPlayer();showView("myplayer");
+    savePlayers([payload,...getPlayers()]);
+    loadMyPlayer();loadSubmissions();showView("myplayer");
   };
 
-  async function loadMasterSave(){
-    const {data}=await supabase.from("league_state").select("*").eq("id",1).maybeSingle();
-    masterSave=data?.save_json||null;
+  function loadMasterSave(){
+    masterSave=readJSON(STORAGE_KEYS.save,null);
     $("saveInfo").textContent=masterSave?`Loaded: season ${masterSave.gameAttributes?.season??"?"}, ${masterSave.players?.length??0} players`:"No save uploaded.";
   }
   $("saveFile").onchange=async e=>{
@@ -232,12 +188,11 @@
     try{
       const parsed=JSON.parse(await f.text());
       if(!Array.isArray(parsed.players))throw new Error("This JSON has no players array.");
-      const {error}=await supabase.from("league_state").upsert({id:1,save_json:parsed,updated_by:session.user.id,updated_at:new Date().toISOString()});
-      if(error)throw error; masterSave=parsed;await loadMasterSave();alert("Master save uploaded.");
+      masterSave=parsed;writeJSON(STORAGE_KEYS.save,masterSave);loadMasterSave();alert("Master save uploaded locally.");
     }catch(err){alert(err.message)}
   };
-  $("downloadSave").onclick=async()=>{
-    await loadMasterSave(); if(!masterSave){alert("No save uploaded.");return}
+  $("downloadSave").onclick=()=>{
+    loadMasterSave(); if(!masterSave){alert("No save uploaded.");return}
     const blob=new Blob([JSON.stringify(masterSave,null,2)],{type:"application/json"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`bbgm-updated-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);
   };
@@ -274,54 +229,44 @@
     }
   }
 
-  async function loadSubmissions(){
-    const {data,error}=await supabase.from("players").select("*,profiles(display_name)").order("created_at",{ascending:false});
-    if(error){$("submissionList").textContent=error.message;return}
+  function loadSubmissions(){
+    const data=getPlayers().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     $("submissionList").innerHTML=(data||[]).map(p=>`
       <div class="item">
         <div class="row between"><strong>${esc(p.first_name)} ${esc(p.last_name)}</strong><span class="status ${esc(p.status)}">${esc(p.status)}</span></div>
-        <p class="muted">${esc(p.profiles?.display_name||"Discord user")} · ${esc(p.position)} · ${esc(p.build)}</p>
+        <p class="muted">Local player · ${esc(p.position)} · ${esc(p.build)}</p>
         ${p.status==="pending"?`<div class="row"><button class="ok" data-approve="${p.id}">Approve + insert</button><button class="danger" data-reject="${p.id}">Reject</button></div>`:""}
       </div>`).join("")||"<p class='muted'>No submissions.</p>";
     document.querySelectorAll("[data-approve]").forEach(b=>b.onclick=()=>approvePlayer(b.dataset.approve));
     document.querySelectorAll("[data-reject]").forEach(b=>b.onclick=()=>rejectPlayer(b.dataset.reject));
   }
-  async function approvePlayer(id){
-    await loadMasterSave(); if(!masterSave){alert("Upload a master save first.");return}
-    const {data:p,error}=await supabase.from("players").select("*").eq("id",id).single(); if(error){alert(error.message);return}
-    if(p.status!=="pending"){alert("Only pending players can be approved.");await loadSubmissions();return}
+  function approvePlayer(id){
+    loadMasterSave(); if(!masterSave){alert("Upload a master save first.");return}
+    const players=getPlayers();
+    const p=players.find(x=>x.id===id); if(!p){alert("Player not found.");return}
+    if(p.status!=="pending"){alert("Only pending players can be approved.");loadSubmissions();return}
     const existing=(masterSave.players||[]).find(x=>x.customId===playerExportKey(p.id));
     const playerObj=existing||toBBGMPlayer(p,masterSave);
     if(!existing)masterSave.players.push(playerObj);
-    const {error:saveErr}=await supabase.from("league_state").update({save_json:masterSave,updated_by:session.user.id,updated_at:new Date().toISOString()}).eq("id",1);
-    if(saveErr){alert(saveErr.message);return}
-    const {error:playerErr}=await supabase.from("players").update({status:"approved",bbgm_pid:playerObj.pid}).eq("id",id);
-    if(playerErr){alert(playerErr.message);return}
-    await loadSubmissions();await loadMasterSave();
+    p.status="approved";p.bbgm_pid=playerObj.pid;
+    savePlayers(players);writeJSON(STORAGE_KEYS.save,masterSave);
+    loadSubmissions();loadMyPlayer();loadMasterSave();
   }
-  async function rejectPlayer(id){
-    const {error}=await supabase.from("players").update({status:"rejected"}).eq("id",id);
-    if(error)alert(error.message); else loadSubmissions();
+  function rejectPlayer(id){
+    const players=getPlayers();
+    const p=players.find(x=>x.id===id); if(!p)return;
+    p.status="rejected";savePlayers(players);loadSubmissions();loadMyPlayer();
   }
 
-  async function start(){
+  function start(){
     initBuilds();
-    if(!configured){renderConfigSetup();return;}
-    const {data:{session:s}}=await supabase.auth.getSession(); session=s;
-    supabase.auth.onAuthStateChange((_event,s)=>{session=s;if(!s)location.reload()});
-    if(!session)return;
-    await loadProfile();
     $("loggedOut").classList.add("hidden");$("app").classList.remove("hidden");
-    $("authArea").innerHTML=`<span class="small">${esc(profile.display_name||session.user.user_metadata?.full_name||"User")}</span><button id="logoutBtn" class="secondary">Log out</button>`;
-    $("logoutBtn").onclick=logout;
-    $("userName").textContent=profile.display_name||session.user.user_metadata?.full_name||"Discord user";
-    $("userId").textContent=session.user.id;
-    const admin=profile.role==="commissioner";
-    $("adminTab").classList.toggle("hidden",!admin);
-    if(admin){await loadMasterSave();await loadSubmissions()}
-    await loadMyPlayer();
+    $("adminTab").classList.remove("hidden");
+    $("authArea").innerHTML=`<span class="small">Local mode</span>`;
+    $("userName").textContent="Local browser user";
+    loadMasterSave();loadSubmissions();loadMyPlayer();
   }
-  start().catch(err=>alert(err.message));
+  start();
 </script>
 </body>
 </html>
