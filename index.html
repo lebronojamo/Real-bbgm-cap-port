@@ -107,9 +107,10 @@
     "Rim Protector":{base:40,bonus:{diq:20,jmp:14,stre:12,reb:18},points:64}
   };
   const SYNC_CONFIG_KEY = "bbgmJsonStorageConfig";
+  const DEFAULT_JSONSTORAGE_URL = "https://api.jsonstorage.net/v1/json/0c65f971-1e6d-4c55-b8a0-e95f80ef4157/89186335-cf4d-4475-8cbd-a3a0c26dbae9";
   const EMPTY_STORE = {players:[],save:null};
 
-  let myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, cloudStore={...EMPTY_STORE}, syncConfig=JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY)||"{}");
+  let myPlayer=null, masterSave=null, currentRatings={}, baseRatings={}, pointsBudget=0, cloudStore={...EMPTY_STORE}, syncConfig={url:DEFAULT_JSONSTORAGE_URL,...JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY)||"{}")};
 
   const $=id=>document.getElementById(id);
   function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -139,16 +140,30 @@
     cloudStore=normalizeStore(await res.json());
     return cloudStore;
   }
+  async function jsonStorageError(prefix,res){
+    let details="";
+    try{details=(await res.text()).slice(0,300)}catch{}
+    return new Error(`${prefix} (${res.status}).${details?` JsonStorage said: ${details}`:""} If this happened after uploading a BBGM export, the save is probably larger than this JsonStorage item's plan limit.`);
+  }
+  async function writeJsonStorage(url,apiKey,method,body){
+    const payload=JSON.stringify(body);
+    let res=await fetch(withApiKey(url,apiKey),{method,headers:{"Content-Type":"application/json"},body:payload});
+    if(!res.ok&&res.status===400){
+      const retry=await fetch(withApiKey(url,apiKey).replace("apiKey=","api_key="),{method,headers:{"Content-Type":"application/json"},body:payload});
+      if(retry.ok)return retry;
+      res=retry;
+    }
+    return res;
+  }
   async function saveStore(){
-    const res=await fetch(withApiKey(syncConfig.url),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cloudStore)});
-    if(!res.ok)throw new Error(`Could not save shared data (${res.status}). Check the JsonStorage API key has write access.`);
+    const res=await writeJsonStorage(syncConfig.url,syncConfig.apiKey,"PUT",cloudStore);
+    if(!res.ok)throw await jsonStorageError("Could not save shared data",res);
   }
   async function createSharedStore(apiKey){
-    const itemId=`bbgm-cap-${newLocalId()}`;
-    const url=normalizeJsonStorageUrl(itemId);
-    const res=await fetch(withApiKey(url,apiKey),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(EMPTY_STORE)});
-    if(!res.ok)throw new Error(`Could not create JsonStorage item (${res.status}).`);
-    return url;
+    const res=await writeJsonStorage("https://api.jsonstorage.net/v1/json",apiKey,"POST",EMPTY_STORE);
+    if(!res.ok)throw await jsonStorageError("Could not create JsonStorage item",res);
+    const created=await res.json().catch(()=>({}));
+    return normalizeJsonStorageUrl(created.uri||created.url||created.location||"");
   }
   function getPlayers(){return cloudStore.players}
   function savePlayers(players){cloudStore.players=players}
@@ -310,10 +325,10 @@
       ${message?`<p class="status rejected">${esc(message)}</p>`:""}
       <form id="syncForm">
         <label>JsonStorage item URL</label>
-        <input id="syncUrl" placeholder="https://api.jsonstorage.net/v1/json/YOUR_ITEM_ID or just YOUR_ITEM_ID" value="${esc(syncConfig.url||"")}" required>
+        <input id="syncUrl" placeholder="https://api.jsonstorage.net/v1/json/USER_ID/ITEM_ID" value="${esc(syncConfig.url||DEFAULT_JSONSTORAGE_URL)}" required>
         <label>JsonStorage write API key</label>
         <textarea id="syncApiKey" rows="2" placeholder="Paste an API key with write access" required>${esc(syncConfig.apiKey||"")}</textarea>
-        <p class="small muted">Use the same item URL and API key on every device. The key is only remembered in this browser so the static site can write updates.</p>
+        <p class="small muted">Use the same item URL and API key on every device. The provided JsonStorage GET link is prefilled. If saving fails after uploading a BBGM export, the export is probably too large for the JsonStorage item/plan.</p>
         <div class="row" style="margin-top:12px">
           <button type="submit">Connect this device</button>
           <button type="button" class="secondary" id="createSharedStoreBtn">Create new JsonStorage item</button>
@@ -328,7 +343,7 @@
       }catch(err){renderSyncSetup(err.message)}
     };
     $("syncForm").onsubmit=async e=>{
-      e.preventDefault();syncConfig={url:normalizeJsonStorageUrl($("syncUrl").value),apiKey:$("syncApiKey").value.trim()};
+      e.preventDefault();syncConfig={url:normalizeJsonStorageUrl($("syncUrl").value||DEFAULT_JSONSTORAGE_URL),apiKey:$("syncApiKey").value.trim()};
       localStorage.setItem(SYNC_CONFIG_KEY,JSON.stringify(syncConfig));await start();
     };
   }
