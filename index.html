@@ -118,9 +118,19 @@
     return {players:Array.isArray(store?.players)?store.players:[],save:store?.save||null};
   }
   function configured(){return Boolean(syncConfig.url&&syncConfig.apiKey)}
-  function withApiKey(url){
+  function normalizeJsonStorageUrl(value){
+    const raw=value.trim();
+    if(!raw)return "";
+    if(/^https?:\/\//i.test(raw)){
+      const u=new URL(raw);
+      u.search="";
+      return u.toString();
+    }
+    return `https://api.jsonstorage.net/v1/json/${encodeURIComponent(raw)}`;
+  }
+  function withApiKey(url,apiKey=syncConfig.apiKey){
     const u=new URL(url);
-    u.searchParams.set("apiKey",syncConfig.apiKey);
+    u.searchParams.set("apiKey",apiKey);
     return u.toString();
   }
   async function fetchStore(){
@@ -134,12 +144,11 @@
     if(!res.ok)throw new Error(`Could not save shared data (${res.status}). Check the JsonStorage API key has write access.`);
   }
   async function createSharedStore(apiKey){
-    const res=await fetch(`https://api.jsonstorage.net/v1/json?apiKey=${encodeURIComponent(apiKey)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(EMPTY_STORE)});
+    const itemId=`bbgm-cap-${newLocalId()}`;
+    const url=normalizeJsonStorageUrl(itemId);
+    const res=await fetch(withApiKey(url,apiKey),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(EMPTY_STORE)});
     if(!res.ok)throw new Error(`Could not create JsonStorage item (${res.status}).`);
-    const location=res.headers.get("Location");
-    if(location)return location;
-    const body=await res.json().catch(()=>({}));
-    return body.uri||body.url||body.location||body.id||"";
+    return url;
   }
   function getPlayers(){return cloudStore.players}
   function savePlayers(players){cloudStore.players=players}
@@ -301,7 +310,7 @@
       ${message?`<p class="status rejected">${esc(message)}</p>`:""}
       <form id="syncForm">
         <label>JsonStorage item URL</label>
-        <input id="syncUrl" type="url" placeholder="https://api.jsonstorage.net/v1/json/YOUR_USER_ID/bbgm-cap" value="${esc(syncConfig.url||"")}" required>
+        <input id="syncUrl" placeholder="https://api.jsonstorage.net/v1/json/YOUR_ITEM_ID or just YOUR_ITEM_ID" value="${esc(syncConfig.url||"")}" required>
         <label>JsonStorage write API key</label>
         <textarea id="syncApiKey" rows="2" placeholder="Paste an API key with write access" required>${esc(syncConfig.apiKey||"")}</textarea>
         <p class="small muted">Use the same item URL and API key on every device. The key is only remembered in this browser so the static site can write updates.</p>
@@ -315,12 +324,11 @@
       if(!apiKey){alert("Paste a JsonStorage API key first.");return}
       try{
         const url=await createSharedStore(apiKey);
-        if(!url)throw new Error("JsonStorage did not return a new item URL. Create one in the dashboard and paste it here.");
         syncConfig={url,apiKey};localStorage.setItem(SYNC_CONFIG_KEY,JSON.stringify(syncConfig));await start();
       }catch(err){renderSyncSetup(err.message)}
     };
     $("syncForm").onsubmit=async e=>{
-      e.preventDefault();syncConfig={url:$("syncUrl").value.trim(),apiKey:$("syncApiKey").value.trim()};
+      e.preventDefault();syncConfig={url:normalizeJsonStorageUrl($("syncUrl").value),apiKey:$("syncApiKey").value.trim()};
       localStorage.setItem(SYNC_CONFIG_KEY,JSON.stringify(syncConfig));await start();
     };
   }
