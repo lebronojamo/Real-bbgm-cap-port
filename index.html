@@ -34,8 +34,9 @@
   <div id="configWarning" class="card hidden"></div>
 
   <section id="loggedOut" class="card">
-    <h2>Local CAP portal</h2>
-    <p class="muted">Create players locally, approve them, and download a Basketball GM export with no account setup.</p>
+    <h2>Shared CAP portal</h2>
+    <p class="muted">Connect this browser to the shared cloud save so every device sees the same players and master export.</p>
+    <div id="syncSetupContent"></div>
   </section>
 
   <section id="app" class="hidden">
@@ -53,7 +54,7 @@
 
     <div id="view-create" class="view card hidden">
       <h2>Create Player</h2>
-      <p class="muted">Choose a build, then distribute the available points. One active local player at a time.</p>
+      <p class="muted">Choose a build, then distribute the available points. One active player at a time in the shared portal.</p>
       <form id="playerForm">
         <div class="grid cols">
           <div><label>First name</label><input id="firstName" required maxlength="30"></div>
@@ -88,7 +89,7 @@
     <div id="view-setup" class="view card hidden">
       <h2>Account</h2>
       <p>Account: <strong id="userName"></strong></p>
-      <p class="small muted">All data is stored in this browser with <code>localStorage</code>. Export your Basketball GM JSON after approving players.</p>
+      <p class="small muted">Player submissions and the master save are synced through the shared cloud save URL. Keep that URL private and use it on each device.</p>
     </div>
   </section>
 </main>
@@ -105,19 +106,34 @@
     "Post Scorer":{base:40,bonus:{ins:23,stre:18,fg:12,reb:8},points:64},
     "Rim Protector":{base:40,bonus:{diq:20,jmp:14,stre:12,reb:18},points:64}
   };
-  const STORAGE_KEYS = {players:"bbgmCapPlayers",save:"bbgmMasterSave"};
+  const SYNC_URL_KEY = "bbgmSharedStoreUrl";
+  const EMPTY_STORE = {players:[],save:null};
 
-  let myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, masterSave=null;
+  let myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, cloudStore={...EMPTY_STORE}, syncUrl=localStorage.getItem(SYNC_URL_KEY)||"";
 
   const $=id=>document.getElementById(id);
   function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
-  function readJSON(key,fallback){
-    try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}
-  }
-  function writeJSON(key,value){localStorage.setItem(key,JSON.stringify(value))}
-  function getPlayers(){return readJSON(STORAGE_KEYS.players,[])}
-  function savePlayers(players){writeJSON(STORAGE_KEYS.players,players)}
   function newLocalId(){return `${Date.now()}-${Math.random().toString(36).slice(2,9)}`}
+  function normalizeStore(store){
+    return {players:Array.isArray(store?.players)?store.players:[],save:store?.save||null};
+  }
+  async function fetchStore(){
+    const res=await fetch(syncUrl,{cache:"no-store"});
+    if(!res.ok)throw new Error(`Could not load shared save (${res.status}).`);
+    cloudStore=normalizeStore(await res.json());
+    return cloudStore;
+  }
+  async function saveStore(){
+    const res=await fetch(syncUrl,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cloudStore)});
+    if(!res.ok)throw new Error(`Could not save shared data (${res.status}).`);
+  }
+  async function createSharedStore(){
+    const res=await fetch("https://jsonblob.com/api/jsonBlob",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(EMPTY_STORE)});
+    if(!res.ok)throw new Error(`Could not create shared save (${res.status}).`);
+    return res.headers.get("Location");
+  }
+  function getPlayers(){return cloudStore.players}
+  function savePlayers(players){cloudStore.players=players}
   function showView(name){
     document.querySelectorAll(".view").forEach(x=>x.classList.add("hidden"));
     $("view-"+name).classList.remove("hidden");
@@ -165,8 +181,10 @@
       </div>`;
   }
 
-  $("playerForm").onsubmit=e=>{
+  $("playerForm").onsubmit=async e=>{
     e.preventDefault();
+    try{await fetchStore();loadMyPlayer();}
+    catch(err){alert(err.message);return}
     if(myPlayer && myPlayer.status!=="rejected"){alert("You already have an active player.");return}
     const spent=ATTRS.reduce((n,a)=>n+(currentRatings[a]-baseRatings[a]),0);
     if(spent!==pointsBudget){alert("Use all attribute points before submitting.");return}
@@ -176,11 +194,12 @@
       ratings:{...currentRatings},status:"pending",created_at:new Date().toISOString()
     };
     savePlayers([payload,...getPlayers()]);
-    loadMyPlayer();loadSubmissions();showView("myplayer");
+    try{await saveStore();loadMyPlayer();loadSubmissions();showView("myplayer");}
+    catch(err){alert(err.message)}
   };
 
   function loadMasterSave(){
-    masterSave=readJSON(STORAGE_KEYS.save,null);
+    masterSave=cloudStore.save;
     $("saveInfo").textContent=masterSave?`Loaded: season ${masterSave.gameAttributes?.season??"?"}, ${masterSave.players?.length??0} players`:"No save uploaded.";
   }
   $("saveFile").onchange=async e=>{
@@ -188,10 +207,12 @@
     try{
       const parsed=JSON.parse(await f.text());
       if(!Array.isArray(parsed.players))throw new Error("This JSON has no players array.");
-      masterSave=parsed;writeJSON(STORAGE_KEYS.save,masterSave);loadMasterSave();alert("Master save uploaded locally.");
+      await fetchStore();cloudStore.save=parsed;await saveStore();loadMasterSave();alert("Master save uploaded to the shared cloud save.");
     }catch(err){alert(err.message)}
   };
-  $("downloadSave").onclick=()=>{
+  $("downloadSave").onclick=async()=>{
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
     loadMasterSave(); if(!masterSave){alert("No save uploaded.");return}
     const blob=new Blob([JSON.stringify(masterSave,null,2)],{type:"application/json"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`bbgm-updated-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);
@@ -234,13 +255,15 @@
     $("submissionList").innerHTML=(data||[]).map(p=>`
       <div class="item">
         <div class="row between"><strong>${esc(p.first_name)} ${esc(p.last_name)}</strong><span class="status ${esc(p.status)}">${esc(p.status)}</span></div>
-        <p class="muted">Local player · ${esc(p.position)} · ${esc(p.build)}</p>
+        <p class="muted">Shared player · ${esc(p.position)} · ${esc(p.build)}</p>
         ${p.status==="pending"?`<div class="row"><button class="ok" data-approve="${p.id}">Approve + insert</button><button class="danger" data-reject="${p.id}">Reject</button></div>`:""}
       </div>`).join("")||"<p class='muted'>No submissions.</p>";
     document.querySelectorAll("[data-approve]").forEach(b=>b.onclick=()=>approvePlayer(b.dataset.approve));
     document.querySelectorAll("[data-reject]").forEach(b=>b.onclick=()=>rejectPlayer(b.dataset.reject));
   }
-  function approvePlayer(id){
+  async function approvePlayer(id){
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
     loadMasterSave(); if(!masterSave){alert("Upload a master save first.");return}
     const players=getPlayers();
     const p=players.find(x=>x.id===id); if(!p){alert("Player not found.");return}
@@ -249,24 +272,53 @@
     const playerObj=existing||toBBGMPlayer(p,masterSave);
     if(!existing)masterSave.players.push(playerObj);
     p.status="approved";p.bbgm_pid=playerObj.pid;
-    savePlayers(players);writeJSON(STORAGE_KEYS.save,masterSave);
-    loadSubmissions();loadMyPlayer();loadMasterSave();
+    savePlayers(players);cloudStore.save=masterSave;
+    try{await saveStore();loadSubmissions();loadMyPlayer();loadMasterSave();}
+    catch(err){alert(err.message)}
   }
-  function rejectPlayer(id){
+  async function rejectPlayer(id){
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
     const players=getPlayers();
     const p=players.find(x=>x.id===id); if(!p)return;
-    p.status="rejected";savePlayers(players);loadSubmissions();loadMyPlayer();
+    p.status="rejected";savePlayers(players);
+    try{await saveStore();loadSubmissions();loadMyPlayer();}
+    catch(err){alert(err.message)}
   }
 
-  function start(){
+  function renderSyncSetup(message=""){
+    $("loggedOut").classList.remove("hidden");$("app").classList.add("hidden");
+    $("syncSetupContent").innerHTML=`
+      ${message?`<p class="status rejected">${esc(message)}</p>`:""}
+      <div class="row" style="margin:12px 0"><button id="createSharedStoreBtn">Create shared cloud save</button></div>
+      <form id="syncForm">
+        <label>Shared cloud save URL</label>
+        <input id="syncUrl" type="url" placeholder="https://jsonblob.com/api/jsonBlob/..." value="${esc(syncUrl)}" required>
+        <p class="small muted">Use the same URL on every device. Anyone with the URL can edit this shared save.</p>
+        <button type="submit">Connect this device</button>
+      </form>`;
+    $("createSharedStoreBtn").onclick=async()=>{
+      try{syncUrl=await createSharedStore();localStorage.setItem(SYNC_URL_KEY,syncUrl);await start();}
+      catch(err){renderSyncSetup(err.message)}
+    };
+    $("syncForm").onsubmit=async e=>{
+      e.preventDefault();syncUrl=$("syncUrl").value.trim();localStorage.setItem(SYNC_URL_KEY,syncUrl);await start();
+    };
+  }
+
+  async function start(){
     initBuilds();
+    if(!syncUrl){renderSyncSetup();return}
+    try{await fetchStore();}
+    catch(err){renderSyncSetup(err.message);return}
     $("loggedOut").classList.add("hidden");$("app").classList.remove("hidden");
     $("adminTab").classList.remove("hidden");
-    $("authArea").innerHTML=`<span class="small">Local mode</span>`;
-    $("userName").textContent="Local browser user";
+    $("authArea").innerHTML=`<span class="small">Shared cloud mode</span><button id="changeSyncBtn" class="secondary">Change save</button>`;
+    $("changeSyncBtn").onclick=()=>renderSyncSetup();
+    $("userName").textContent="Shared cloud user";
     loadMasterSave();loadSubmissions();loadMyPlayer();
   }
-  start();
+  start().catch(err=>renderSyncSetup(err.message));
 </script>
 </body>
 </html>
