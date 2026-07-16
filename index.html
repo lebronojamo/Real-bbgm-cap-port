@@ -34,9 +34,9 @@
   <div id="configWarning" class="card hidden"></div>
 
   <section id="loggedOut" class="card">
-    <h2>Shared server portal</h2>
-    <p class="muted">Sign in with Discord to create and manage your player.</p>
-    <button id="loginBtn">Sign in with Discord</button>
+    <h2>Shared CAP portal</h2>
+    <p class="muted">Connect this browser to the shared JsonStorage save so every device sees the same players and master export.</p>
+    <div id="syncSetupContent"></div>
   </section>
 
   <section id="app" class="hidden">
@@ -54,7 +54,7 @@
 
     <div id="view-create" class="view card hidden">
       <h2>Create Player</h2>
-      <p class="muted">Choose a build, then distribute the available points. One active player per Discord account.</p>
+      <p class="muted">Choose a build, then distribute the available points. One active player at a time in the shared portal.</p>
       <form id="playerForm">
         <div class="grid cols">
           <div><label>First name</label><input id="firstName" required maxlength="30"></div>
@@ -88,23 +88,13 @@
 
     <div id="view-setup" class="view card hidden">
       <h2>Account</h2>
-      <p>Discord account: <strong id="userName"></strong></p>
-      <p class="small muted">Supabase user ID: <code id="userId"></code></p>
-      <p class="small muted">The commissioner sets this account’s role to <code>commissioner</code> in Supabase.</p>
+      <p>Account: <strong id="userName"></strong></p>
+      <p class="small muted">Player submissions and the master save are synced through the shared JsonStorage item URL. Keep the URL and write API key private and use them on each device.</p>
     </div>
   </section>
 </main>
 
 <script type="module">
-  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-  // Replace these two values from Supabase: Project Settings → API
-  const SUPABASE_URL = "PASTE_SUPABASE_URL";
-  const SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_KEY";
-
-  const configured = !SUPABASE_URL.startsWith("PASTE_") && !SUPABASE_ANON_KEY.startsWith("PASTE_");
-  const supabase = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
-
   const ATTRS = ["stre","spd","jmp","endu","ins","dnk","ft","fg","tp","oiq","diq","drb","pss","reb"];
   const LABELS = {stre:"Strength",spd:"Speed",jmp:"Jumping",endu:"Endurance",ins:"Inside",dnk:"Dunks/Layups",ft:"Free Throws",fg:"Two Pointers",tp:"Three Pointers",oiq:"Offensive IQ",diq:"Defensive IQ",drb:"Dribbling",pss:"Passing",reb:"Rebounding"};
   const BUILDS = {
@@ -116,11 +106,67 @@
     "Post Scorer":{base:40,bonus:{ins:23,stre:18,fg:12,reb:8},points:64},
     "Rim Protector":{base:40,bonus:{diq:20,jmp:14,stre:12,reb:18},points:64}
   };
+  const SYNC_CONFIG_KEY = "bbgmJsonStorageConfig";
+  const DEFAULT_JSONSTORAGE_URL = "https://api.jsonstorage.net/v1/json/0c65f971-1e6d-4c55-b8a0-e95f80ef4157/89186335-cf4d-4475-8cbd-a3a0c26dbae9";
+  const EMPTY_STORE = {players:[],save:null};
 
-  let session=null, profile=null, myPlayer=null, currentRatings={}, baseRatings={}, pointsBudget=0, masterSave=null;
+  let myPlayer=null, masterSave=null, currentRatings={}, baseRatings={}, pointsBudget=0, cloudStore={...EMPTY_STORE}, syncConfig={url:DEFAULT_JSONSTORAGE_URL,...JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY)||"{}")};
 
   const $=id=>document.getElementById(id);
   function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+  function newLocalId(){return `${Date.now()}-${Math.random().toString(36).slice(2,9)}`}
+  function normalizeStore(store){
+    return {players:Array.isArray(store?.players)?store.players:[],save:store?.save||null};
+  }
+  function configured(){return Boolean(syncConfig.url&&syncConfig.apiKey)}
+  function normalizeJsonStorageUrl(value){
+    const raw=value.trim();
+    if(!raw)return "";
+    if(/^https?:\/\//i.test(raw)){
+      const u=new URL(raw);
+      u.search="";
+      return u.toString();
+    }
+    return `https://api.jsonstorage.net/v1/json/${encodeURIComponent(raw)}`;
+  }
+  function withApiKey(url,apiKey=syncConfig.apiKey){
+    const u=new URL(url);
+    u.searchParams.set("apiKey",apiKey);
+    return u.toString();
+  }
+  async function fetchStore(){
+    const res=await fetch(syncConfig.url,{cache:"no-store"});
+    if(!res.ok)throw new Error(`Could not load shared save (${res.status}).`);
+    cloudStore=normalizeStore(await res.json());
+    return cloudStore;
+  }
+  async function jsonStorageError(prefix,res){
+    let details="";
+    try{details=(await res.text()).slice(0,300)}catch{}
+    return new Error(`${prefix} (${res.status}).${details?` JsonStorage said: ${details}`:""} If this happened after uploading a BBGM export, the save is probably larger than this JsonStorage item's plan limit.`);
+  }
+  async function writeJsonStorage(url,apiKey,method,body){
+    const payload=JSON.stringify(body);
+    let res=await fetch(withApiKey(url,apiKey),{method,headers:{"Content-Type":"application/json"},body:payload});
+    if(!res.ok&&res.status===400){
+      const retry=await fetch(withApiKey(url,apiKey).replace("apiKey=","api_key="),{method,headers:{"Content-Type":"application/json"},body:payload});
+      if(retry.ok)return retry;
+      res=retry;
+    }
+    return res;
+  }
+  async function saveStore(){
+    const res=await writeJsonStorage(syncConfig.url,syncConfig.apiKey,"PUT",cloudStore);
+    if(!res.ok)throw await jsonStorageError("Could not save shared data",res);
+  }
+  async function createSharedStore(apiKey){
+    const res=await writeJsonStorage("https://api.jsonstorage.net/v1/json",apiKey,"POST",EMPTY_STORE);
+    if(!res.ok)throw await jsonStorageError("Could not create JsonStorage item",res);
+    const created=await res.json().catch(()=>({}));
+    return normalizeJsonStorageUrl(created.uri||created.url||created.location||"");
+  }
+  function getPlayers(){return cloudStore.players}
+  function savePlayers(players){cloudStore.players=players}
   function showView(name){
     document.querySelectorAll(".view").forEach(x=>x.classList.add("hidden"));
     $("view-"+name).classList.remove("hidden");
@@ -154,19 +200,9 @@
     });
   }
 
-  async function login(){
-    await supabase.auth.signInWithOAuth({provider:"discord",options:{redirectTo:location.origin+location.pathname}});
-  }
-  async function logout(){await supabase.auth.signOut();location.reload()}
-  $("loginBtn").onclick=login;
-
-  async function loadProfile(){
-    const {data,error}=await supabase.from("profiles").select("*").eq("id",session.user.id).single();
-    if(error) throw error; profile=data;
-  }
-  async function loadMyPlayer(){
-    const {data}=await supabase.from("players").select("*").eq("user_id",session.user.id).order("created_at",{ascending:false}).limit(1).maybeSingle();
-    myPlayer=data; renderMyPlayer();
+  function loadMyPlayer(){
+    myPlayer=getPlayers().slice().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at))[0]||null;
+    renderMyPlayer();
   }
   function renderMyPlayer(){
     if(!myPlayer){$("myPlayerContent").innerHTML="No player submitted.";return}
@@ -180,22 +216,23 @@
 
   $("playerForm").onsubmit=async e=>{
     e.preventDefault();
+    try{await fetchStore();loadMyPlayer();}
+    catch(err){alert(err.message);return}
     if(myPlayer && myPlayer.status!=="rejected"){alert("You already have an active player.");return}
     const spent=ATTRS.reduce((n,a)=>n+(currentRatings[a]-baseRatings[a]),0);
     if(spent!==pointsBudget){alert("Use all attribute points before submitting.");return}
     const payload={
-      user_id:session.user.id,first_name:$("firstName").value.trim(),last_name:$("lastName").value.trim(),
+      id:newLocalId(),first_name:$("firstName").value.trim(),last_name:$("lastName").value.trim(),
       position:$("position").value,build:$("build").value,age:Number($("age").value),height:Number($("height").value),
-      ratings:currentRatings,status:"pending"
+      ratings:{...currentRatings},status:"pending",created_at:new Date().toISOString()
     };
-    const {error}=await supabase.from("players").insert(payload);
-    if(error){alert(error.message);return}
-    await loadMyPlayer();showView("myplayer");
+    savePlayers([payload,...getPlayers()]);
+    try{await saveStore();loadMyPlayer();loadSubmissions();showView("myplayer");}
+    catch(err){alert(err.message)}
   };
 
-  async function loadMasterSave(){
-    const {data}=await supabase.from("league_state").select("*").eq("id",1).maybeSingle();
-    masterSave=data?.save_json||null;
+  function loadMasterSave(){
+    masterSave=cloudStore.save;
     $("saveInfo").textContent=masterSave?`Loaded: season ${masterSave.gameAttributes?.season??"?"}, ${masterSave.players?.length??0} players`:"No save uploaded.";
   }
   $("saveFile").onchange=async e=>{
@@ -203,80 +240,127 @@
     try{
       const parsed=JSON.parse(await f.text());
       if(!Array.isArray(parsed.players))throw new Error("This JSON has no players array.");
-      const {error}=await supabase.from("league_state").upsert({id:1,save_json:parsed,updated_by:session.user.id,updated_at:new Date().toISOString()});
-      if(error)throw error; masterSave=parsed;await loadMasterSave();alert("Master save uploaded.");
+      await fetchStore();cloudStore.save=parsed;await saveStore();loadMasterSave();alert("Master save uploaded to JsonStorage.");
     }catch(err){alert(err.message)}
   };
   $("downloadSave").onclick=async()=>{
-    await loadMasterSave(); if(!masterSave){alert("No save uploaded.");return}
-    const blob=new Blob([JSON.stringify(masterSave)],{type:"application/json"});
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
+    loadMasterSave(); if(!masterSave){alert("No save uploaded.");return}
+    const blob=new Blob([JSON.stringify(masterSave,null,2)],{type:"application/json"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`bbgm-updated-${Date.now()}.json`;a.click();URL.revokeObjectURL(a.href);
   };
 
-  function nextPid(save){return Math.max(-1,...(save.players||[]).map(p=>Number(p.pid)||-1))+1}
+  function safeInt(value,fallback){
+    const n=Number(value);
+    return Number.isInteger(n)?n:fallback;
+  }
+  function nextPid(save){
+    const used=new Set((save.players||[]).map(p=>safeInt(p.pid,null)).filter(pid=>pid!==null&&pid>=0));
+    let pid=0;
+    while(used.has(pid))pid++;
+    return pid;
+  }
+  function normalizeRatings(ratings){
+    return Object.fromEntries(ATTRS.map(a=>[a,Math.max(0,Math.min(100,safeInt(ratings?.[a],0)))]));
+  }
+  function playerExportKey(id){return `cap-portal:${id}`}
   function toBBGMPlayer(p,save){
     const season=save.gameAttributes?.season||new Date().getFullYear();
+    const ratings=normalizeRatings(p.ratings);
+    const age=Math.max(18,Math.min(25,safeInt(p.age,19)));
+    const height=Math.max(65,Math.min(90,safeInt(p.height,78)));
     return {
       pid:nextPid(save),tid:-1,firstName:p.first_name,lastName:p.last_name,pos:p.position,
-      hgt:p.height,weight:210,born:{year:season-p.age,loc:""},
+      hgt:height,weight:210,born:{year:season-age,loc:""},
+      customId:playerExportKey(p.id),
       college:"",country:"",injury:{type:"Healthy",gamesRemaining:0},
       contract:{amount:1000,exp:season+1},draft:{year:season,round:0,pick:0,tid:-1,originalTid:-1},
-      ratings:[{season,pos:p.position,hgt:p.height,stre:p.ratings.stre,spd:p.ratings.spd,jmp:p.ratings.jmp,endu:p.ratings.endu,
-        ins:p.ratings.ins,dnk:p.ratings.dnk,ft:p.ratings.ft,fg:p.ratings.fg,tp:p.ratings.tp,oiq:p.ratings.oiq,
-        diq:p.ratings.diq,drb:p.ratings.drb,pss:p.ratings.pss,reb:p.ratings.reb,pot:75,skills:[],fuzz:0}],
+      ratings:[{season,pos:p.position,hgt:height,stre:ratings.stre,spd:ratings.spd,jmp:ratings.jmp,endu:ratings.endu,
+        ins:ratings.ins,dnk:ratings.dnk,ft:ratings.ft,fg:ratings.fg,tp:ratings.tp,oiq:ratings.oiq,
+        diq:ratings.diq,drb:ratings.drb,pss:ratings.pss,reb:ratings.reb,pot:75,skills:[],fuzz:0}],
       stats:[],awards:[],salaries:[],transactions:[],relatives:[],watch:0,gamesUntilTradable:0
     }
   }
 
-  async function loadSubmissions(){
-    const {data,error}=await supabase.from("players").select("*,profiles(display_name)").order("created_at",{ascending:false});
-    if(error){$("submissionList").textContent=error.message;return}
+  function loadSubmissions(){
+    const data=getPlayers().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     $("submissionList").innerHTML=(data||[]).map(p=>`
       <div class="item">
         <div class="row between"><strong>${esc(p.first_name)} ${esc(p.last_name)}</strong><span class="status ${esc(p.status)}">${esc(p.status)}</span></div>
-        <p class="muted">${esc(p.profiles?.display_name||"Discord user")} · ${esc(p.position)} · ${esc(p.build)}</p>
+        <p class="muted">Shared player · ${esc(p.position)} · ${esc(p.build)}</p>
         ${p.status==="pending"?`<div class="row"><button class="ok" data-approve="${p.id}">Approve + insert</button><button class="danger" data-reject="${p.id}">Reject</button></div>`:""}
       </div>`).join("")||"<p class='muted'>No submissions.</p>";
     document.querySelectorAll("[data-approve]").forEach(b=>b.onclick=()=>approvePlayer(b.dataset.approve));
     document.querySelectorAll("[data-reject]").forEach(b=>b.onclick=()=>rejectPlayer(b.dataset.reject));
   }
   async function approvePlayer(id){
-    await loadMasterSave(); if(!masterSave){alert("Upload a master save first.");return}
-    const {data:p,error}=await supabase.from("players").select("*").eq("id",id).single(); if(error){alert(error.message);return}
-    const playerObj=toBBGMPlayer(p,masterSave); masterSave.players.push(playerObj);
-    const {error:saveErr}=await supabase.from("league_state").update({save_json:masterSave,updated_by:session.user.id,updated_at:new Date().toISOString()}).eq("id",1);
-    if(saveErr){alert(saveErr.message);return}
-    const {error:playerErr}=await supabase.from("players").update({status:"approved",bbgm_pid:playerObj.pid}).eq("id",id);
-    if(playerErr){alert(playerErr.message);return}
-    await loadSubmissions();await loadMasterSave();
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
+    loadMasterSave(); if(!masterSave){alert("Upload a master save first.");return}
+    const players=getPlayers();
+    const p=players.find(x=>x.id===id); if(!p){alert("Player not found.");return}
+    if(p.status!=="pending"){alert("Only pending players can be approved.");loadSubmissions();return}
+    const existing=(masterSave.players||[]).find(x=>x.customId===playerExportKey(p.id));
+    const playerObj=existing||toBBGMPlayer(p,masterSave);
+    if(!existing)masterSave.players.push(playerObj);
+    p.status="approved";p.bbgm_pid=playerObj.pid;
+    savePlayers(players);cloudStore.save=masterSave;
+    try{await saveStore();loadSubmissions();loadMyPlayer();loadMasterSave();}
+    catch(err){alert(err.message)}
   }
   async function rejectPlayer(id){
-    const {error}=await supabase.from("players").update({status:"rejected"}).eq("id",id);
-    if(error)alert(error.message); else loadSubmissions();
+    try{await fetchStore();}
+    catch(err){alert(err.message);return}
+    const players=getPlayers();
+    const p=players.find(x=>x.id===id); if(!p)return;
+    p.status="rejected";savePlayers(players);
+    try{await saveStore();loadSubmissions();loadMyPlayer();}
+    catch(err){alert(err.message)}
+  }
+
+  function renderSyncSetup(message=""){
+    $("loggedOut").classList.remove("hidden");$("app").classList.add("hidden");
+    $("syncSetupContent").innerHTML=`
+      ${message?`<p class="status rejected">${esc(message)}</p>`:""}
+      <form id="syncForm">
+        <label>JsonStorage item URL</label>
+        <input id="syncUrl" placeholder="https://api.jsonstorage.net/v1/json/USER_ID/ITEM_ID" value="${esc(syncConfig.url||DEFAULT_JSONSTORAGE_URL)}" required>
+        <label>JsonStorage write API key</label>
+        <textarea id="syncApiKey" rows="2" placeholder="Paste an API key with write access" required>${esc(syncConfig.apiKey||"")}</textarea>
+        <p class="small muted">Use the same item URL and API key on every device. The provided JsonStorage GET link is prefilled. If saving fails after uploading a BBGM export, the export is probably too large for the JsonStorage item/plan.</p>
+        <div class="row" style="margin-top:12px">
+          <button type="submit">Connect this device</button>
+          <button type="button" class="secondary" id="createSharedStoreBtn">Create new JsonStorage item</button>
+        </div>
+      </form>`;
+    $("createSharedStoreBtn").onclick=async()=>{
+      const apiKey=$("syncApiKey").value.trim();
+      if(!apiKey){alert("Paste a JsonStorage API key first.");return}
+      try{
+        const url=await createSharedStore(apiKey);
+        syncConfig={url,apiKey};localStorage.setItem(SYNC_CONFIG_KEY,JSON.stringify(syncConfig));await start();
+      }catch(err){renderSyncSetup(err.message)}
+    };
+    $("syncForm").onsubmit=async e=>{
+      e.preventDefault();syncConfig={url:normalizeJsonStorageUrl($("syncUrl").value||DEFAULT_JSONSTORAGE_URL),apiKey:$("syncApiKey").value.trim()};
+      localStorage.setItem(SYNC_CONFIG_KEY,JSON.stringify(syncConfig));await start();
+    };
   }
 
   async function start(){
     initBuilds();
-    if(!configured){
-      $("configWarning").classList.remove("hidden");
-      $("configWarning").innerHTML="<strong>Setup required:</strong> replace <code>PASTE_SUPABASE_URL</code> and <code>PASTE_SUPABASE_ANON_KEY</code> in this file.";
-      $("loginBtn").disabled=true; return;
-    }
-    const {data:{session:s}}=await supabase.auth.getSession(); session=s;
-    supabase.auth.onAuthStateChange((_event,s)=>{session=s;if(!s)location.reload()});
-    if(!session)return;
-    await loadProfile();
+    if(!configured()){renderSyncSetup();return}
+    try{await fetchStore();}
+    catch(err){renderSyncSetup(err.message);return}
     $("loggedOut").classList.add("hidden");$("app").classList.remove("hidden");
-    $("authArea").innerHTML=`<span class="small">${esc(profile.display_name||session.user.user_metadata?.full_name||"User")}</span><button id="logoutBtn" class="secondary">Log out</button>`;
-    $("logoutBtn").onclick=logout;
-    $("userName").textContent=profile.display_name||session.user.user_metadata?.full_name||"Discord user";
-    $("userId").textContent=session.user.id;
-    const admin=profile.role==="commissioner";
-    $("adminTab").classList.toggle("hidden",!admin);
-    if(admin){await loadMasterSave();await loadSubmissions()}
-    await loadMyPlayer();
+    $("adminTab").classList.remove("hidden");
+    $("authArea").innerHTML=`<span class="small">JsonStorage shared mode</span><button id="changeSyncBtn" class="secondary">Change save</button>`;
+    $("changeSyncBtn").onclick=()=>renderSyncSetup();
+    $("userName").textContent="JsonStorage shared user";
+    loadMasterSave();loadSubmissions();loadMyPlayer();
   }
-  start().catch(err=>alert(err.message));
+  start().catch(err=>renderSyncSetup(err.message));
 </script>
 </body>
 </html>
