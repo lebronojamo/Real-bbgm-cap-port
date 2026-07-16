@@ -98,9 +98,12 @@
 <script type="module">
   import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-  // Replace these two values from Supabase: Project Settings → API
-  const SUPABASE_URL = "PASTE_SUPABASE_URL";
-  const SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_KEY";
+  // Optional defaults. If left as placeholders, commissioners can enter config in the setup panel.
+  const DEFAULT_SUPABASE_URL = "PASTE_SUPABASE_URL";
+  const DEFAULT_SUPABASE_ANON_KEY = "PASTE_SUPABASE_ANON_KEY";
+  const savedConfig = JSON.parse(localStorage.getItem("bbgmSupabaseConfig")||"{}");
+  const SUPABASE_URL = savedConfig.url||DEFAULT_SUPABASE_URL;
+  const SUPABASE_ANON_KEY = savedConfig.anonKey||DEFAULT_SUPABASE_ANON_KEY;
 
   const configured = !SUPABASE_URL.startsWith("PASTE_") && !SUPABASE_ANON_KEY.startsWith("PASTE_");
   const supabase = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -155,10 +158,36 @@
   }
 
   async function login(){
+    if(!supabase)return;
     await supabase.auth.signInWithOAuth({provider:"discord",options:{redirectTo:location.origin+location.pathname}});
   }
   async function logout(){await supabase.auth.signOut();location.reload()}
   $("loginBtn").onclick=login;
+
+  function renderConfigSetup(){
+    $("loggedOut").classList.add("hidden");
+    $("configWarning").classList.remove("hidden");
+    $("configWarning").innerHTML=`
+      <h2>Connect Supabase</h2>
+      <p class="muted">Paste your Supabase Project URL and anon public key, then reload to enable Discord sign-in. These values are saved only in this browser.</p>
+      <form id="configForm">
+        <label>Supabase Project URL</label>
+        <input id="configUrl" type="url" placeholder="https://your-project.supabase.co" value="${esc(savedConfig.url||"")}" required>
+        <label>Supabase anon public key</label>
+        <textarea id="configAnonKey" rows="3" placeholder="eyJ..." required>${esc(savedConfig.anonKey||"")}</textarea>
+        <div class="row" style="margin-top:12px">
+          <button type="submit">Save setup</button>
+          <button type="button" class="secondary" id="clearConfigBtn">Clear saved setup</button>
+        </div>
+      </form>`;
+    $("configForm").onsubmit=e=>{
+      e.preventDefault();
+      localStorage.setItem("bbgmSupabaseConfig",JSON.stringify({url:$("configUrl").value.trim(),anonKey:$("configAnonKey").value.trim()}));
+      location.reload();
+    };
+    $("clearConfigBtn").onclick=()=>{localStorage.removeItem("bbgmSupabaseConfig");location.reload()};
+    $("loginBtn").disabled=true;
+  }
 
   async function loadProfile(){
     const {data,error}=await supabase.from("profiles").select("*").eq("id",session.user.id).single();
@@ -277,11 +306,7 @@
 
   async function start(){
     initBuilds();
-    if(!configured){
-      $("configWarning").classList.remove("hidden");
-      $("configWarning").innerHTML="<strong>Setup required:</strong> replace <code>PASTE_SUPABASE_URL</code> and <code>PASTE_SUPABASE_ANON_KEY</code> in this file.";
-      $("loginBtn").disabled=true; return;
-    }
+    if(!configured){renderConfigSetup();return;}
     const {data:{session:s}}=await supabase.auth.getSession(); session=s;
     supabase.auth.onAuthStateChange((_event,s)=>{session=s;if(!s)location.reload()});
     if(!session)return;
